@@ -14,6 +14,8 @@
  *
  * return: 1 if got new data. 0 for timeout. -1 for error.
  *
+ * if got new data. you should free(*data) by yourself.
+ *
  */
 int ulink_recv(const char *dev, int timeout, unsigned char **data, size_t *size);
 
