@@ -1,8 +1,8 @@
 package com.uniview.x.ulink;
 
+import android.os.Bundle;
 import android.os.Message;
 import android.support.v7.app.ActionBarActivity;
-import android.os.Bundle;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -18,7 +18,7 @@ public class MainActivity extends ActionBarActivity {
     private android.os.Handler handler = new android.os.Handler() {
         @Override
         public void handleMessage(Message msg) {
-            Button btn = null;
+            Button btn;
             switch (msg.what) {
                 case Sender.MSG_START:
                     btn = (Button) findViewById(R.id.btnTest);
@@ -73,9 +73,18 @@ public class MainActivity extends ActionBarActivity {
             snd.stop();
             snd = null;
         } else {
+            byte[] bytes = txt.getText().toString().getBytes();
+            byte[] bytesSend = new byte[bytes.length + 1];
+            System.arraycopy(bytes, 0, bytesSend, 0, bytes.length);
+            bytesSend[bytes.length] = 0;
+
             snd = new Sender();
             snd.setHandler(handler);
-            snd.send(txt.getText().toString().getBytes());
+            try {
+                snd.send(bytesSend);
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
         }
     }
 }
