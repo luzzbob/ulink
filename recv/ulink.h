@@ -17,7 +17,7 @@
  */
 int ulink_recv(const char *dev, int timeout, unsigned char **data, size_t *size);
 
-
+#if 0
 /* async recv callback
  *
  * context: context by ulink_recv_async.
@@ -42,6 +42,8 @@ void *ulink_recv_async(const char *dev, int timeout);
  * cleanup recv context.
  */
 void ulink_recv_cleanup(void *context);
+
+#endif
 
 #endif /* __ulink_h__ */
 
