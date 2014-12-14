@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
 {
     int ret;
     unsigned char *data = NULL;
-    size_t len;
+    size_t len = 0;
     char *dev = "wlan0";
 
     if (argc > 1)
