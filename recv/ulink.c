@@ -294,7 +294,7 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
                         }
                         else
                         {
-                            LOG_("crc mismatch! %02x, %s", ud->data_crc, ud->data);
+                            LOG_("crc mismatch! %02x", ud->data_crc);
                             ud->flags = 1;
                         }
                         // notify break thread
