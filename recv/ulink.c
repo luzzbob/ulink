@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -17,6 +18,7 @@
 #include "ulink.h"
 
 #define CHANNEL_SCAN_TIME (200)
+#define CHANNEL_READ_TIME (3000)
 #define CHANNEL_SCAN_PACKET_COUNT (20)
 
 #define LOGL_(l,fmt...) do { \
@@ -164,15 +166,19 @@ static inline unsigned long long get_timestamp()
 typedef struct internal_data_
 {
     pcap_t *handle;
-    unsigned long long first_time;
+    pthread_mutex_t mutex_;
+    pthread_cond_t cond_;
     unsigned char smac[MAC_BUFF_COUNT][6];
     unsigned int  smac_count[MAC_BUFF_COUNT];
     unsigned int  smac_offset;
     unsigned char xmac[6];
     int flags;
     unsigned char data[256];
-    int  data_length;
-    int read_offset;
+    unsigned char data_crc;
+    int data_length;
+    unsigned char xdata_flags[128];
+    int  xdata_length;
+    int xdata_read;
 } internal_data_t;
 
 
@@ -181,55 +187,33 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
     internal_data_t *ud = (internal_data_t *) data;
     int radio_head_length = 0;
     const unsigned char *pkt_mac = NULL;
-    unsigned long long current_time = hdr->ts.tv_sec * 1000 + hdr->ts.tv_usec / 1000;
     int i = 0;
-
-    if (!ud->first_time)
+    
+    if (ud->flags == 0)
     {
-        ud->first_time = hdr->ts.tv_sec * 1000 + hdr->ts.tv_usec / 1000;
-    }
-    else
-    {
-        if (current_time - ud->first_time > 2000 + CHANNEL_SCAN_TIME)
+        /* check for flags*/
+        int smax = 0;
+        for(i=0; i<ud->smac_offset; i++)
         {
-            pcap_breakloop(ud->handle);
-        }
-
-        /* after CHANNEL_SCAN_TIME ms */
-        if (current_time - ud->first_time > CHANNEL_SCAN_TIME)
-        {
-            if (ud->flags == 0)
+            if (ud->smac_count[i] > smax)
             {
-                /* check for flags*/
-                int smax = 0;
-                for(i=0; i<ud->smac_offset; i++)
-                {
-                    if (ud->smac_count[i] > smax)
-                    {
-                        smax = ud->smac_count[i];
-                        memcpy(ud->xmac, ud->smac[i], 6);
-                    }
-                }
-
-                if (smax > CHANNEL_SCAN_PACKET_COUNT)
-                {
-                    ud->flags = 1;
-                    LOG_("find ulink sender: %02x-%02x-%02x-%02x-%02x-%02x\n", 
-                        ud->xmac[0] & 0xff, 
-                        ud->xmac[1] & 0xff, 
-                        ud->xmac[2] & 0xff, 
-                        ud->xmac[3] & 0xff, 
-                        ud->xmac[4] & 0xff, 
-                        ud->xmac[5] & 0xff);
-                }
-                else
-                {
-                    pcap_breakloop(ud->handle);
-                }
+                smax = ud->smac_count[i];
+                memcpy(ud->xmac, ud->smac[i], 6);
             }
         }
-    }
 
+        if (smax > CHANNEL_SCAN_PACKET_COUNT)
+        {
+            ud->flags = 1;
+            LOG_("find ulink sender: %02x-%02x-%02x-%02x-%02x-%02x\n", 
+                ud->xmac[0] & 0xff, 
+                ud->xmac[1] & 0xff, 
+                ud->xmac[2] & 0xff, 
+                ud->xmac[3] & 0xff, 
+                ud->xmac[4] & 0xff, 
+                ud->xmac[5] & 0xff);
+        }
+    }
 
     radio_head_length = pkt[2] & 0xff;
     pkt_mac = &pkt[radio_head_length];
@@ -269,15 +253,96 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
                 // new mac
                 memcpy(ud->smac[i], &pkt_mac[16], 6);
                 ud->smac_count[i] = 1;
-
                 ud->smac_offset++;
             }
         }
         else if(ud->flags == 1)
         {
-            
+            if (memcmp(&pkt_mac[16], ud->xmac, 6) == 0)
+            {
+                unsigned char seq = pkt_mac[7] & 0x7f; 
+                unsigned char d1 =  pkt_mac[8];
+                unsigned char d2 =  pkt_mac[9];
+
+                if (ud->xdata_flags[seq] == 0)
+                {
+                    ud->xdata_read += 1;
+                    ud->xdata_flags[seq] = 1;
+
+                    if (seq == 0)
+                    {
+                        ud->data_crc = d2;
+                        ud->xdata_length = (d1 + 1)/2 + 1;
+                        ud->data_length = d1;
+                    }
+                    else
+                    {
+                        ud->data[seq*2-2] = d1;
+                        ud->data[seq*2-1] = d2;
+                    }
+                    
+                    if (ud->xdata_length > 0 && ud->xdata_length == ud->xdata_read)
+                    {
+                        int i = 0;
+                        for (i=0; i<ud->data_length; i++)
+                        {
+                            ud->data_crc ^= ud->data[i];
+                        }
+                        if (ud->data_crc == 0)
+                        {
+                            ud->flags = 2;
+                        }
+                        else
+                        {
+                            LOG_("crc mismatch! %02x, %s", ud->data_crc, ud->data);
+                            ud->flags = 1;
+                        }
+                        // notify break thread
+                        pthread_mutex_lock(&ud->mutex_);
+                        pthread_cond_signal(&ud->cond_);       
+                        pthread_mutex_unlock(&ud->mutex_);
+                    }
+                }
+            }
         }
     }
+}
+
+void *pcap_break_proc_(void *args)
+{
+    struct timeval now;
+    struct timespec wait1, wait2;
+    internal_data_t *ud = (internal_data_t *)args;
+
+    gettimeofday(&now, NULL);
+    
+    wait1.tv_sec = now.tv_sec + CHANNEL_SCAN_TIME / 1000;
+    wait1.tv_nsec = now.tv_usec * 1000 + (CHANNEL_SCAN_TIME % 1000) * 1000000;
+
+    wait1.tv_sec += wait1.tv_nsec / 1000000000;
+    wait1.tv_nsec %= 1000000000;
+
+    wait2.tv_sec = wait1.tv_sec + CHANNEL_READ_TIME / 1000;
+    wait2.tv_nsec = wait1.tv_nsec;
+
+    // wait first timeout.
+    pthread_mutex_lock(&ud->mutex_);
+    pthread_cond_timedwait(&ud->cond_, &ud->mutex_, &wait1);
+    pthread_mutex_unlock(&ud->mutex_);
+    if (ud->flags != 1)
+    {
+        pcap_breakloop(ud->handle);
+        return NULL;
+    }
+
+    // second wait.
+    pthread_mutex_lock(&ud->mutex_);
+    pthread_cond_timedwait(&ud->cond_, &ud->mutex_, &wait2);
+    pthread_mutex_unlock(&ud->mutex_);
+    
+    pcap_breakloop(ud->handle);
+
+    return NULL;
 }
 
 
@@ -287,7 +352,7 @@ int ulink_recv(const char *dev, int timeout, unsigned char **data, size_t *size)
     ulink_recv_t *t;
     int channel = 1;
     unsigned long long start, now;
-    internal_data_t udata;
+    internal_data_t *udata = (internal_data_t *)malloc(sizeof(internal_data_t));
 
     t = ulink_recv_open(dev);
     if (t)
@@ -299,11 +364,32 @@ int ulink_recv(const char *dev, int timeout, unsigned char **data, size_t *size)
         
         while(1)
         {
-            now = get_timestamp();
-            memset(&udata, 0, sizeof(udata));
-            udata.handle = t->pcap_handle;
+            pthread_t break_thread;
+            memset(udata, 0, sizeof(internal_data_t));
 
-            pcap_loop(t->pcap_handle, -1, ulink_recv_callback, (unsigned char *)&udata);
+            /* init data */
+            udata->handle = t->pcap_handle;
+            pthread_mutex_init(&udata->mutex_, NULL); 
+            pthread_cond_init(&udata->cond_, NULL);
+            
+
+            (void)pthread_create(&break_thread, NULL, pcap_break_proc_, udata);
+            pcap_loop(t->pcap_handle, -1, ulink_recv_callback, (unsigned char *)udata);
+            pthread_join(break_thread, NULL);
+            
+            // some cleanup
+            pthread_mutex_destroy(&udata->mutex_);
+            pthread_cond_destroy(&udata->cond_);
+
+            /* check flags */
+            if (udata->flags == 2)
+            {
+                *data = (unsigned char *)(char *)malloc((size_t)udata->data_length);
+                *size = udata->data_length;
+                memcpy(*data, udata->data, udata->data_length);
+                ret = 1;
+                break;
+            }
             
             channel %= 14;
             channel++;
@@ -320,6 +406,8 @@ int ulink_recv(const char *dev, int timeout, unsigned char **data, size_t *size)
 
         ulink_recv_close(t);
     }
+
+    free(udata);
 
     return ret;
 }
