@@ -17,7 +17,7 @@
 
 #include "ulink.h"
 
-#define CHANNEL_SCAN_TIME (200)
+#define CHANNEL_SCAN_TIME (300)
 #define CHANNEL_READ_TIME (3000)
 #define CHANNEL_SCAN_PACKET_COUNT (20)
 
@@ -42,19 +42,28 @@
     } \
 } while (0)
 
+static int debug=0;
 #define LOG_(fmt...) LOGL_(1,##fmt)
+#define LOGD_(fmt...) LOGL_(debug,##fmt)
 
 typedef struct ulink_recv_
 {
     pcap_t *pcap_handle;
+    struct bpf_program bpf;
 } ulink_recv_t;
 
 static ulink_recv_t *ulink_recv_open(const char *netdev)
 {
 	int err;
     ulink_recv_t *t = NULL;
+
+    if (getenv("debug") != NULL)
+    {
+        debug = 1;
+    }
     
     t = (ulink_recv_t *)malloc(sizeof(ulink_recv_t));
+    memset(t, 0, sizeof(ulink_recv_t));
 
     /* init the pcap */
     {
@@ -85,6 +94,7 @@ static ulink_recv_t *ulink_recv_open(const char *netdev)
             return NULL;
         }
 
+
         err = pcap_set_timeout(t->pcap_handle, CHANNEL_SCAN_TIME);
         if (err)
         {
@@ -103,6 +113,27 @@ static ulink_recv_t *ulink_recv_open(const char *netdev)
             return NULL;
         }
 
+        /* filter */
+        err = pcap_compile(t->pcap_handle, &t->bpf, "ether multicast and type data subtype qos-data", 1, 0);
+        if (err)
+        {
+            LOG_("pcap_compile failed: %s", pcap_geterr(t->pcap_handle));
+            pcap_close(t->pcap_handle);
+            free(t);
+            return NULL;
+        }
+
+
+        err = pcap_setfilter(t->pcap_handle, &t->bpf);
+        if (err)
+        {
+            LOG_("pcap_setfilter failed: %s", pcap_statustostr(err));
+            pcap_freecode(&t->bpf);
+            pcap_close(t->pcap_handle);
+            free(t);
+            return NULL;
+        }
+
     }
     
 	return t;
@@ -111,6 +142,7 @@ static ulink_recv_t *ulink_recv_open(const char *netdev)
 
 static void ulink_recv_close(ulink_recv_t *t)
 {
+    pcap_freecode(&t->bpf);
     pcap_close(t->pcap_handle);
     LOG_("ulink_recv_close: %p", t);
     free(t);
@@ -189,59 +221,35 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
     const unsigned char *pkt_mac = NULL;
     int i = 0;
     
-    if (ud->flags == 0)
-    {
-        /* check for flags*/
-        int smax = 0;
-        for(i=0; i<ud->smac_offset; i++)
-        {
-            if (ud->smac_count[i] > smax)
-            {
-                smax = ud->smac_count[i];
-                memcpy(ud->xmac, ud->smac[i], 6);
-            }
-        }
-
-        if (smax > CHANNEL_SCAN_PACKET_COUNT)
-        {
-            ud->flags = 1;
-            LOG_("find ulink sender: %02x-%02x-%02x-%02x-%02x-%02x\n", 
-                ud->xmac[0] & 0xff, 
-                ud->xmac[1] & 0xff, 
-                ud->xmac[2] & 0xff, 
-                ud->xmac[3] & 0xff, 
-                ud->xmac[4] & 0xff, 
-                ud->xmac[5] & 0xff);
-        }
-    }
-
     radio_head_length = pkt[2] & 0xff;
     pkt_mac = &pkt[radio_head_length];
 
     // skip too short and too long.
-    if ((hdr->len < radio_head_length + 22) || (hdr->len > radio_head_length + 300))
+    if ((hdr->len < radio_head_length + 30) || (hdr->len > radio_head_length + 300))
     {
         return;
     }
 
     // check dest mac address if a multicast
+#if 0
     if (pkt_mac[4] == 0x01 && 
         pkt_mac[5] == 0x00 && 
         pkt_mac[6] == 0x5e && 
         (pkt_mac[7] & 0x80) == 0x00)
+#endif
     {
 
         if (ud->flags == 0)
         {
             for (i=0; i<ud->smac_offset; i++)
             {
-                /* source mac compare 16-21 */
-                if (pkt_mac[21] == ud->smac[i][5] &&
-                    pkt_mac[20] == ud->smac[i][4] &&
-                    pkt_mac[19] == ud->smac[i][3] &&
-                    pkt_mac[18] == ud->smac[i][2] &&
-                    pkt_mac[17] == ud->smac[i][1] &&
-                    pkt_mac[16] == ud->smac[i][0])
+                /* source mac compare 10-15 */
+                if (pkt_mac[15] == ud->smac[i][5] &&
+                    pkt_mac[14] == ud->smac[i][4] &&
+                    pkt_mac[13] == ud->smac[i][3] &&
+                    pkt_mac[12] == ud->smac[i][2] &&
+                    pkt_mac[11] == ud->smac[i][1] &&
+                    pkt_mac[10] == ud->smac[i][0])
                 {
                     ud->smac_count[i]++;
                     break;
@@ -251,18 +259,43 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
             if (i == ud->smac_offset && ud->smac_offset < MAC_BUFF_COUNT)
             {
                 // new mac
-                memcpy(ud->smac[i], &pkt_mac[16], 6);
+                memcpy(ud->smac[i], &pkt_mac[10], 6);
                 ud->smac_count[i] = 1;
                 ud->smac_offset++;
+            }
+
+
+            /* check for flags*/
+            int smax = 0;
+            for(i=0; i<ud->smac_offset; i++)
+            {
+                if (ud->smac_count[i] > smax)
+                {
+                    smax = ud->smac_count[i];
+                    memcpy(ud->xmac, ud->smac[i], 6);
+                }
+            }
+
+            if (smax > CHANNEL_SCAN_PACKET_COUNT)
+            {
+                ud->flags = 1;
+                LOG_("find ulink sender: %02x-%02x-%02x-%02x-%02x-%02x\n", 
+                    ud->xmac[0] & 0xff, 
+                    ud->xmac[1] & 0xff, 
+                    ud->xmac[2] & 0xff, 
+                    ud->xmac[3] & 0xff, 
+                    ud->xmac[4] & 0xff, 
+                    ud->xmac[5] & 0xff);
             }
         }
         else if(ud->flags == 1)
         {
-            if (memcmp(&pkt_mac[16], ud->xmac, 6) == 0)
+            if (memcmp(&pkt_mac[10], ud->xmac, 6) == 0)
             {
-                unsigned char seq = pkt_mac[7] & 0x7f; 
-                unsigned char d1 =  pkt_mac[8];
-                unsigned char d2 =  pkt_mac[9];
+                unsigned char seq = pkt_mac[19] & 0x7f; 
+                unsigned char d1 =  pkt_mac[20];
+                unsigned char d2 =  pkt_mac[21];
+                LOGD_("recv: %02x %02x %02x", seq, d1, d2);
 
                 if (ud->xdata_flags[seq] == 0)
                 {
