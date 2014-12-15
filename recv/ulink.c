@@ -156,9 +156,9 @@ static void switch_channel(const char *dev, int channel)
 
 static inline unsigned long long get_timestamp()
 {
-    struct timespec tp;
-    clock_gettime(CLOCK_MONOTONIC,&tp);
-    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000);
+    struct timeval ts;
+    gettimeofday(&ts, NULL);
+    return (ts.tv_sec * 1000) + (ts.tv_usec / 1000);
 }
 
 

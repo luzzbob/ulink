@@ -3,7 +3,7 @@ CFLAGS=-Wall -g
 all: ulink_test
 
 ulink_test: ulink_test.o ulink.o
-	$(CC) -o $@ $^ -lpcap -lrt -lpthread
+	$(CC) -o $@ $^ -lpcap -lpthread
 
 %.o:%.c
 	$(CC) -c -o $@ $^ $(CFLAGS)
