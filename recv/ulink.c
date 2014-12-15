@@ -114,7 +114,7 @@ static ulink_recv_t *ulink_recv_open(const char *netdev)
         }
 
         /* filter */
-        err = pcap_compile(t->pcap_handle, &t->bpf, "ether multicast and type data subtype qos-data", 1, 0);
+        err = pcap_compile(t->pcap_handle, &t->bpf, "ether multicast and type data subtype qos-data or subtype data", 1, 0);
         if (err)
         {
             LOG_("pcap_compile failed: %s", pcap_geterr(t->pcap_handle));
@@ -218,25 +218,43 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
 {
     internal_data_t *ud = (internal_data_t *) data;
     int radio_head_length = 0;
-    const unsigned char *pkt_mac = NULL;
+    const unsigned char *src_mac = NULL;
+    const unsigned char *dst_mac = NULL;
+    int subtype = 0;
     int i = 0;
     
     radio_head_length = pkt[2] & 0xff;
-    pkt_mac = &pkt[radio_head_length];
 
     // skip too short and too long.
-    if ((hdr->len < radio_head_length + 30) || (hdr->len > radio_head_length + 300))
+    if ((hdr->len < radio_head_length + 22) || (hdr->len > radio_head_length + 300))
     {
         return;
     }
 
+    subtype = (pkt[radio_head_length] & 0xf0) >> 4;
+    if (subtype == 0)
+    {
+        // data
+        src_mac = &pkt[radio_head_length+16];
+        dst_mac = &pkt[radio_head_length+4];
+    }
+    else if (subtype == 0x08)
+    {
+        // qos-data
+        src_mac = &pkt[radio_head_length+10];
+        dst_mac = &pkt[radio_head_length+16];
+    }
+    else
+    {
+        return;
+    }
+
+
     // check dest mac address if a multicast
-#if 0
-    if (pkt_mac[4] == 0x01 && 
-        pkt_mac[5] == 0x00 && 
-        pkt_mac[6] == 0x5e && 
-        (pkt_mac[7] & 0x80) == 0x00)
-#endif
+    if (dst_mac[0] == 0x01 && 
+        dst_mac[1] == 0x00 && 
+        dst_mac[2] == 0x5e && 
+        (dst_mac[3] & 0x80) == 0x00)
     {
 
         if (ud->flags == 0)
@@ -244,12 +262,7 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
             for (i=0; i<ud->smac_offset; i++)
             {
                 /* source mac compare 10-15 */
-                if (pkt_mac[15] == ud->smac[i][5] &&
-                    pkt_mac[14] == ud->smac[i][4] &&
-                    pkt_mac[13] == ud->smac[i][3] &&
-                    pkt_mac[12] == ud->smac[i][2] &&
-                    pkt_mac[11] == ud->smac[i][1] &&
-                    pkt_mac[10] == ud->smac[i][0])
+                if (memcmp(src_mac, ud->smac[i], 6) == 0)
                 {
                     ud->smac_count[i]++;
                     break;
@@ -259,7 +272,7 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
             if (i == ud->smac_offset && ud->smac_offset < MAC_BUFF_COUNT)
             {
                 // new mac
-                memcpy(ud->smac[i], &pkt_mac[10], 6);
+                memcpy(ud->smac[i], src_mac, 6);
                 ud->smac_count[i] = 1;
                 ud->smac_offset++;
             }
@@ -290,11 +303,11 @@ static void ulink_recv_callback(unsigned char* data, const struct pcap_pkthdr *h
         }
         else if(ud->flags == 1)
         {
-            if (memcmp(&pkt_mac[10], ud->xmac, 6) == 0)
+            if (memcmp(src_mac, ud->xmac, 6) == 0)
             {
-                unsigned char seq = pkt_mac[19] & 0x7f; 
-                unsigned char d1 =  pkt_mac[20];
-                unsigned char d2 =  pkt_mac[21];
+                unsigned char seq = dst_mac[3] & 0x7f; 
+                unsigned char d1 =  dst_mac[4];
+                unsigned char d2 =  dst_mac[5];
                 LOGD_("recv: %02x %02x %02x", seq, d1, d2);
 
                 if (ud->xdata_flags[seq] == 0)
