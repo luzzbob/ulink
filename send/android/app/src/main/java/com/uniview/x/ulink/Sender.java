@@ -161,7 +161,7 @@ public class Sender {
                         InetAddress dst = InetAddress.getByName(sip);
                         DatagramPacket p = new DatagramPacket(x, 1, dst, 1200);
                         sock_.send(p);
-                        Thread.sleep(1, 0);
+                        Thread.sleep(3, 0);
 
                         for (int i = 0; i < data_.length; i += 2) {
                             if (i + 1 < data_.length) {
@@ -172,7 +172,6 @@ public class Sender {
                             dst = InetAddress.getByName(sip);
                             p.setAddress(dst);
                             sock_.send(p);
-                            Thread.sleep(1, 0);
                         }
                     }
                 } catch (Exception ex) {
