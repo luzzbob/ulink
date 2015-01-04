@@ -1,9 +1,9 @@
-CFLAGS=-Wall -g
+CFLAGS=-Wall -O2
 
 all: ulink_test
 
 ulink_test: ulink_test.o ulink.o
-	$(CC) -o $@ $^ -lpcap -lpthread
+	$(CC) -o $@ $^ -lpcap -lpthread -lm
 
 %.o:%.c
 	$(CC) -c -o $@ $^ $(CFLAGS)

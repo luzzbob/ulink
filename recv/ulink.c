@@ -392,11 +392,20 @@ void *pcap_break_proc_(void *args)
 }
 
 
+static int channel_arary[] = {
+    1, 6, 11, 
+    2, 7, 12, 
+    3, 8, 13, 
+    4, 9, 14,
+    5, 10
+};
+
 int ulink_recv(const char *dev, int timeout, unsigned char **data, size_t *size)
 {
     int ret = 0;
     ulink_recv_t *t;
-    int channel = 1;
+    int channel_index = 0;
+    int channel = channel_arary[channel_index];
     unsigned long long start, now;
     internal_data_t *udata = (internal_data_t *)malloc(sizeof(internal_data_t));
 
@@ -437,8 +446,9 @@ int ulink_recv(const char *dev, int timeout, unsigned char **data, size_t *size)
                 break;
             }
             
-            channel %= 14;
-            channel++;
+            channel_index++;
+            channel_index %= sizeof(channel_arary) / sizeof(int);
+            channel = channel_arary[channel_index];
 
             switch_channel(dev, channel);
 
